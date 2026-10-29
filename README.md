@@ -1,6 +1,6 @@
 # Akka.IO TCP microbenchmark
 
-This benchmark reproduces a latency and thread-pool regression in Akka.NET's Akka.IO TCP layer between **1.5.58** and **1.6.0-beta4**, and measures the fix in [petrikero/akka.net#40](https://github.com/petrikero/akka.net/pull/40).
+This benchmark reproduces a latency and thread-pool regression in Akka.NET's Akka.IO TCP layer between **1.5.58** and **1.6.0-beta4**, and measures the fixes in [petrikero/akka.net#41](https://github.com/petrikero/akka.net/pull/41) (per-read allocation) and [#40](https://github.com/petrikero/akka.net/pull/40) (thread-pool hops, stacked on #41).
 
 In 1.6, `TcpConnection` runs on `System.IO.Pipelines` with the default thread-pool schedulers. Every write and every read therefore crosses an extra thread-pool hop, and `RequestPipeRead` allocates a new async state machine for every read. Isolated writes take about twice as long to reach the socket, and each message costs one more thread-pool work item. CPU per message does not measurably change. Akka's `TcpOperationsBenchmarks` saturates the connection, where the separate write pump batches writes, so it does not show the regression. This benchmark runs at moderate, fixed rates, where most writes are isolated.
 
@@ -97,7 +97,7 @@ An EventPipe allocation profile of `sink` on 1.6.0-beta4 (`dotnet-trace --profil
 | 10% | `byte[]` (the copy of the received bytes) |
 | 6% | `Tcp.Received` |
 
-The fix in #40 replaces the per-read async method with one reused continuation per connection. On its own, without the scheduling changes, that change takes a 64 B read from 342 B to 214 B.
+The allocation fix is [petrikero/akka.net#41](https://github.com/petrikero/akka.net/pull/41): one reused read continuation per connection instead of an async method per read. On its own it takes a 64 B read from 342 B to 214 B. The latency fix, [#40](https://github.com/petrikero/akka.net/pull/40), is stacked on top of it, and the `fix` columns above are for both together.
 
 ### The fix's trade-off at saturation
 
