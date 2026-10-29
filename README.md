@@ -1,8 +1,8 @@
 # Akka.IO TCP microbenchmark
 
-This benchmark reproduces a performance regression in Akka.NET's Akka.IO TCP layer between **1.5.58** and **1.6.0-beta4**, and measures the fix in [petrikero/akka.net#40](https://github.com/petrikero/akka.net/pull/40).
+This benchmark reproduces a latency and thread-pool regression in Akka.NET's Akka.IO TCP layer between **1.5.58** and **1.6.0-beta4**, and measures the fix in [petrikero/akka.net#40](https://github.com/petrikero/akka.net/pull/40).
 
-In 1.6, `TcpConnection` runs on `System.IO.Pipelines` with the default thread-pool schedulers. That adds a thread-pool hop to every write and every read, and `RequestPipeRead` allocates a new async state machine for every read. Akka's `TcpOperationsBenchmarks` saturates the connection, where the separate write pump coalesces writes, so it does not show the regression. This benchmark runs at a moderate, fixed rate, where most writes are isolated.
+In 1.6, `TcpConnection` runs on `System.IO.Pipelines` with the default thread-pool schedulers. Every write and every read therefore crosses an extra thread-pool hop, and `RequestPipeRead` allocates a new async state machine for every read. Isolated writes take about twice as long to reach the socket, and each message costs one more thread-pool work item. CPU per message does not measurably change. Akka's `TcpOperationsBenchmarks` saturates the connection, where the separate write pump batches writes, so it does not show the regression. This benchmark runs at moderate, fixed rates, where most writes are isolated.
 
 ## What it measures
 
@@ -42,40 +42,50 @@ The script builds each variant, runs every pattern for every build in alternatin
 
 ### Setup
 
-- **Machine:** 24-core x86-64 Linux (WSL2), .NET 10, Server GC.
+- **Machine:** 24-core x86-64 Linux (WSL2), .NET 10, Server GC. The machine was shared, at load averages of 15–40.
 - **Pinning:** the server ran on 8 cores and the client on 8 others.
-- **Load:** 100 connections at 50 operations/s each, 5,000 operations/s in total.
-- **Windows:** 10 s warm-up, then 20 s measured. Builds were interleaved within each repetition.
-- **Builds:** `1.5.58` and `1.6.0-beta4` are the NuGet packages. `fix` is `Akka.dll` built from the fix branch.
-- **Cells:** each cell is the median of 3 runs, with the min–max range in parentheses. The raw output of every run is in [`results/`](results/).
+- **Load:** 100 connections at 50 or 200 operations/s each.
+- **Windows:** 8 s warm-up, then 20 s measured.
+- **Runs:** each of 8 repetitions ran every workload on all three builds back to back, in rotating order.
+- **Builds:** `1.5.58` and `1.6.0-beta4` are the NuGet packages. `fix` is `Akka.dll` built from the PR branch.
+- **Cells:** the build columns show medians. The ratio columns show the paired mean change with a 95% confidence interval. The raw output of every run is in [`results/paired-matrix.txt`](results/paired-matrix.txt).
 
-### push (write path)
+#### push at 5,000 writes/s (write path)
 
-| | 1.5.58 | 1.6.0-beta4 | fix |
-|---|---|---|---|
-| one-way latency p50 (ms) | 0.090 (0.089–0.096) | 0.173 (0.166–0.279) | 0.100 (0.093–0.104) |
-| CPU per operation (µs) | 149 (136–157) | 138 (132–159) | 145 (142–161) |
-| allocated per operation (B) | 574 (572–583) | 343 (327–346) | 336 (336–338) |
-| thread-pool work items per operation | 2.02 (2.02–2.02) | 3.02 (3.02–3.02) | 2.02 (2.02–2.02) |
+| | 1.5.58 | 1.6.0-beta4 | fix | 1.6.0-beta4 vs 1.5.58 | fix vs 1.6.0-beta4 |
+|---|---|---|---|---|---|
+| one-way latency p50 (ms) | 0.094 | 0.191 | 0.092 | +101% [+78, +128] | -54% [-63, -41] |
+| thread-pool work items per operation | 2.02 | 3.02 | 2.02 | +50% [+50, +50] | -33% [-33, -33] |
+| allocated per operation (B) | 577 | 334 | 332 | -42% [-43, -41] | -0% [-2, +1] |
+| CPU per operation (µs) | 137.8 | 136.1 | 135.7 | -4% [-9, +1] | +4% [-3, +11] |
 
-### sink (read path)
+#### push at 20,000 writes/s
 
-| | 1.5.58 | 1.6.0-beta4 | fix |
-|---|---|---|---|
-| one-way latency p50 (ms) | 0.263 (0.261–0.321) | 0.281 (0.249–0.425) | 0.259 (0.217–0.426) |
-| CPU per operation (µs) | 114 (113–114) | 108 (107–129) | 103 (94–134) |
-| allocated per operation (B) | 188 (188–188) | 340 (340–341) | 181 (180–181) |
-| thread-pool work items per operation | 2.36 (2.35–2.36) | 3.37 (3.30–3.38) | 2.36 (2.28–2.40) |
+| | 1.5.58 | 1.6.0-beta4 | fix | 1.6.0-beta4 vs 1.5.58 | fix vs 1.6.0-beta4 |
+|---|---|---|---|---|---|
+| one-way latency p50 (ms) | 0.076 | 0.258 | 0.069 | +252% [+201, +313] | -73% [-76, -69] |
+| thread-pool work items per operation | 2.00 | 3.00 | 2.00 | +50% [+50, +50] | -34% [-34, -33] |
+| allocated per operation (B) | 475 | 234 | 234 | -51% [-51, -50] | -0% [-1, +1] |
+| CPU per operation (µs) | 60.4 | 49.5 | 57.2 | -11% [-23, +4] | +10% [-6, +30] |
 
-### reply (4-write burst per request)
+#### sink at 5,000 reads/s (read path)
 
-| | 1.5.58 | 1.6.0-beta4 | fix |
-|---|---|---|---|
-| one-way latency p50 (ms) | 0.082 (0.073–0.092) | 0.145 (0.129–0.255) | 0.046 (0.042–0.057) |
-| CPU per operation (µs) | 150 (143–167) | 148 (144–154) | 150 (141–154) |
-| allocated per operation (B) | 1581 (1581–1581) | 1141 (1141–1143) | 981 (981–982) |
-| thread-pool work items per operation | 3.32 (3.28–3.33) | 5.35 (5.27–5.38) | 3.31 (3.28–3.36) |
-| socket sends per request (`strace -c`) | 1.85 | 1.00 | 0.98 |
+| | 1.5.58 | 1.6.0-beta4 | fix | 1.6.0-beta4 vs 1.5.58 | fix vs 1.6.0-beta4 |
+|---|---|---|---|---|---|
+| one-way latency p50 (ms) | 0.254 | 0.256 | 0.277 | +1% [-19, +26] | +6% [-15, +31] |
+| thread-pool work items per operation | 2.36 | 3.37 | 2.38 | +43% [+42, +44] | -30% [-33, -28] |
+| allocated per operation (B) | 188 | 341 | 181 | +81% [+80, +82] | -47% [-48, -46] |
+| CPU per operation (µs) | 102.4 | 106.3 | 109.6 | +6% [-14, +30] | -9% [-28, +17] |
+
+#### reply at 5,000 requests/s (4 writes per request)
+
+| | 1.5.58 | 1.6.0-beta4 | fix | 1.6.0-beta4 vs 1.5.58 | fix vs 1.6.0-beta4 |
+|---|---|---|---|---|---|
+| one-way latency p50 (ms) | 0.085 | 0.144 | 0.072 | +63% [+41, +89] | -48% [-53, -44] |
+| thread-pool work items per operation | 3.34 | 5.37 | 3.36 | +61% [+60, +61] | -37% [-38, -37] |
+| allocated per operation (B) | 1581 | 1141 | 981 | -28% [-28, -28] | -14% [-14, -14] |
+| CPU per operation (µs) | 153.4 | 138.4 | 151.7 | -9% [-15, -2] | +6% [-4, +16] |CPU per operation is not significantly different between the three builds in any workload. Latency, thread-pool work items and allocations are.
+
 ### Where the read allocation comes from
 
 An EventPipe allocation profile of `sink` on 1.6.0-beta4 (`dotnet-trace --profile gc-verbose`):
@@ -87,6 +97,15 @@ An EventPipe allocation profile of `sink` on 1.6.0-beta4 (`dotnet-trace --profil
 | 10% | `byte[]` (the copy of the received bytes) |
 | 6% | `Tcp.Received` |
 
-### Why the fix defers flushes
+### The fix's trade-off at saturation
 
-Inline pipe schedulers alone remove the hops, but they send every write separately. The `reply` pattern then makes 4.00 socket sends per request, against 1.00 on stock 1.6.0-beta4. The fix defers the flush of writes without an ack to a self-message, so a burst still leaves in one send (0.98 per request).
+Akka's `TcpOperationsBenchmarks` sends bursts of unacked writes from 1–40 in-process clients as fast as possible. Time per message, fix vs 1.6.0-beta4:
+
+| Clients | 1 | 3 | 5 | 7 | 10 | 20 | 30 | 40 |
+|---|---|---|---|---|---|---|---|---|
+| 10 B messages | −5% | −16% | −14% | −5% | −2% | +3% [−2, +8] | +2% [−3, +7] | +3% [−4, +12] |
+| 100 B messages | −5% | −20% | −16% | −8% | −8% | +1% [−5, +8] | +4% [−3, +12] | **+15% [+12, +19]** |
+
+The cells for 1–10 clients come from one round. The cells for 20–40 clients are paired means over 4 alternating rounds.
+
+The fix sends from the actor's thread, which gives up some of the separate write pump's batching when many connections saturate the dispatcher. Writes still coalesce within one mailbox batch, because the flush is deferred to a self-message when more messages are queued.
