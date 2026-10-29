@@ -97,6 +97,8 @@ An EventPipe allocation profile of `sink` on 1.6.0-beta4 (`dotnet-trace --profil
 | 10% | `byte[]` (the copy of the received bytes) |
 | 6% | `Tcp.Received` |
 
+The allocation fix on its own, without the scheduling changes, is [petrikero/akka.net#41](https://github.com/petrikero/akka.net/pull/41). It takes a 64 B read from 342 B to 214 B.
+
 ### The fix's trade-off at saturation
 
 Akka's `TcpOperationsBenchmarks` sends bursts of unacked writes from 1–40 in-process clients as fast as possible. Time per message, fix vs 1.6.0-beta4:
@@ -109,3 +111,21 @@ Akka's `TcpOperationsBenchmarks` sends bursts of unacked writes from 1–40 in-p
 The cells for 1–10 clients come from one round. The cells for 20–40 clients are paired means over 4 alternating rounds.
 
 The fix sends from the actor's thread, which gives up some of the separate write pump's batching when many connections saturate the dispatcher. Writes still coalesce within one mailbox batch, because the flush is deferred to a self-message when more messages are queued.
+
+## ReceiveActor handler matching
+
+1.6.0-beta4 also replaced `ReceiveActor`'s compiled message matcher with a loop that calls `Type.IsAssignableFrom` on each registered handler in turn, so a message's cost grows with its handler's position. The `match` mode measures this: an actor with 32 `Receive<T>` handlers, sent messages that match handler `k`.
+
+```bash
+out/v1.6.0-beta4/TcpBench match k=31 millions=10
+```
+
+The table shows wall time per message, as the median of 3 runs, with the sender and the actor pinned to 4 cores. The raw output is in [`results/receive-actor-matching.txt`](results/receive-actor-matching.txt).
+
+| Handler matched | 1.5.58 | 1.6.0-beta4 | 1.6.0-beta4 + dispatch cache |
+|---|---|---|---|
+| 1st | 53 ns | 58 ns | 52 ns |
+| 17th | 53 ns | 98 ns | 58 ns |
+| 32nd | 57 ns | 187 ns | 57 ns |
+
+The dispatch cache, in [petrikero/akka.net#42](https://github.com/petrikero/akka.net/pull/42), remembers per message type which handlers can take it.

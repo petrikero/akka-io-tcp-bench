@@ -27,6 +27,7 @@ static class Program
         int Opt(string k, int d) => o.TryGetValue(k, out var v) ? int.Parse(v) : d;
         var cfg = new Cfg(o.TryGetValue("pattern", out var p) ? p : "reply", Opt("port", 7700), Opt("conns", 100), Opt("rate", 20),
             Opt("replies", 4), Opt("replySize", 128), Opt("warmup", 10), Opt("measure", 30));
+        if (mode == "match") return MatchBench.Run(Opt("k", 0), Opt("millions", 20));
         return mode == "server" ? Server.Run(cfg) : Client.Run(cfg);
     }
 
