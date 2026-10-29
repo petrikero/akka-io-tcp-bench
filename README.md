@@ -97,7 +97,7 @@ An EventPipe allocation profile of `sink` on 1.6.0-beta4 (`dotnet-trace --profil
 | 10% | `byte[]` (the copy of the received bytes) |
 | 6% | `Tcp.Received` |
 
-The allocation fix on its own, without the scheduling changes, is [petrikero/akka.net#41](https://github.com/petrikero/akka.net/pull/41). It takes a 64 B read from 342 B to 214 B.
+The fix in #40 replaces the per-read async method with one reused continuation per connection. On its own, without the scheduling changes, that change takes a 64 B read from 342 B to 214 B.
 
 ### The fix's trade-off at saturation
 
