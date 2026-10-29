@@ -5,7 +5,7 @@
 #   AKKA_SRC=~/akka.net ./run.sh              # also an Akka.dll built from a local akka.net checkout
 #
 # Env: REPS (3), WARMUP (10 s), MEASURE (30 s), RATE per connection (50/s), CONNS (100),
-#      PATTERNS ("push sink reply"), SERVER_CPUS (0-7), CLIENT_CPUS (8-15), SPIN (on|off).
+#      PATTERNS ("push sink reply"), SERVER_CPUS (0-7), CLIENT_CPUS (8-15).
 set -euo pipefail
 cd "$(dirname "$0")"
 REPS=${REPS:-3}; WARMUP=${WARMUP:-10}; MEASURE=${MEASURE:-30}; RATE=${RATE:-50}; CONNS=${CONNS:-100}
@@ -29,12 +29,11 @@ if [ -n "${AKKA_SRC:-}" ]; then
   BUILDS="$BUILDS local"
 fi
 
-SPIN_ENV=""; [ "${SPIN:-on}" = off ] && SPIN_ENV="DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0"
 port=7800
 : > logs/results.txt
 for rep in $(seq "$REPS"); do for pat in $PATTERNS; do for b in $BUILDS; do
   port=$((port + 1)); args="pattern=$pat rate=$RATE conns=$CONNS warmup=$WARMUP measure=$MEASURE port=$port"
-  env $SPIN_ENV DOTNET_GCDynamicAdaptationMode=0 taskset -c "$SERVER_CPUS" out/$b/TcpBench server $args > logs/server.txt 2>&1 &
+  env DOTNET_GCDynamicAdaptationMode=0 taskset -c "$SERVER_CPUS" out/$b/TcpBench server $args > logs/server.txt 2>&1 &
   sp=$!
   for _ in $(seq 100); do grep -q ready logs/server.txt 2>/dev/null && break; sleep 0.1; done
   taskset -c "$CLIENT_CPUS" out/v1.6.0-beta4/TcpBench client $args > logs/client.txt 2>&1
