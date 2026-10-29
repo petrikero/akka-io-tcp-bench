@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Build against a NuGet version (-p:AkkaVersion=1.5.58) or a locally built Akka.dll (-p:AkkaDll=/path/Akka.dll). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <AkkaVersion Condition="'$(AkkaVersion)' == ''">1.6.0-beta4</AkkaVersion>
+    <DefineConstants Condition="$(AkkaVersion.StartsWith('1.6'))">$(DefineConstants);AKKA16</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Akka" Version="$(AkkaVersion)" />
+  </ItemGroup>
+</Project>
