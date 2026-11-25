@@ -65,11 +65,14 @@ static class Program
         public static int NextConn = -1;
         public static readonly Hist Latency = new();
         public static readonly List<IActorRef> Handlers = new();
+        public static readonly ManualResetEventSlim Bound = new();
 
         public static int Run(Cfg cfg)
         {
             var sys = ActorSystem.Create("bench", "akka.loglevel = WARNING\nakka.stdout-loglevel = WARNING");
             sys.ActorOf(Props.Create(() => new Listener(cfg)), "listener");
+            // Report ready only once the listener accepts connections, so the client does not race the bind.
+            if (!Server.Bound.Wait(TimeSpan.FromSeconds(10))) { Console.WriteLine("bind timed out"); return 2; }
             Console.WriteLine($"akka={typeof(ActorSystem).Assembly.GetName().Version} pattern={cfg.Pattern} ready");
             var stop = false;
             if (cfg.Pattern == "push")
@@ -141,7 +144,7 @@ static class Program
         public Listener(Cfg cfg)
         {
             Context.System.Tcp().Tell(new Tcp.Bind(Self, new IPEndPoint(IPAddress.Loopback, cfg.Port), backlog: 1024));
-            Receive<Tcp.Bound>(_ => { });
+            Receive<Tcp.Bound>(_ => Server.Bound.Set());
             Receive<Tcp.CommandFailed>(f => { Console.WriteLine($"bind failed: {f}"); Environment.Exit(2); });
             Receive<Tcp.Connected>(_ =>
             {
