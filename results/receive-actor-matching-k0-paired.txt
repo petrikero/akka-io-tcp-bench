@@ -1,0 +1,16 @@
+build=dev rep=1 k=0 ns_per_msg_wall=59.4 cpu_ns_per_msg=201.1
+build=receive-dispatch-cache rep=1 k=0 ns_per_msg_wall=63.9 cpu_ns_per_msg=211.7
+build=receive-dispatch-cache rep=2 k=0 ns_per_msg_wall=64.5 cpu_ns_per_msg=221.5
+build=dev rep=2 k=0 ns_per_msg_wall=60.1 cpu_ns_per_msg=207.3
+build=dev rep=3 k=0 ns_per_msg_wall=55.9 cpu_ns_per_msg=213.0
+build=receive-dispatch-cache rep=3 k=0 ns_per_msg_wall=65.9 cpu_ns_per_msg=226.4
+build=receive-dispatch-cache rep=4 k=0 ns_per_msg_wall=58.5 cpu_ns_per_msg=206.6
+build=dev rep=4 k=0 ns_per_msg_wall=49.5 cpu_ns_per_msg=195.2
+build=dev rep=5 k=0 ns_per_msg_wall=60.1 cpu_ns_per_msg=216.9
+build=receive-dispatch-cache rep=5 k=0 ns_per_msg_wall=61.6 cpu_ns_per_msg=219.3
+build=receive-dispatch-cache rep=6 k=0 ns_per_msg_wall=65.9 cpu_ns_per_msg=223.5
+build=dev rep=6 k=0 ns_per_msg_wall=61.1 cpu_ns_per_msg=224.9
+build=dev rep=7 k=0 ns_per_msg_wall=54.3 cpu_ns_per_msg=204.5
+build=receive-dispatch-cache rep=7 k=0 ns_per_msg_wall=67.1 cpu_ns_per_msg=227.0
+build=receive-dispatch-cache rep=8 k=0 ns_per_msg_wall=65.3 cpu_ns_per_msg=218.6
+build=dev rep=8 k=0 ns_per_msg_wall=59.4 cpu_ns_per_msg=209.3

@@ -1,17 +1,16 @@
-# Akka.IO TCP microbenchmark
+# Akka.IO TCP and ReceiveActor microbenchmarks
 
-This benchmark reproduces a latency and thread-pool regression in Akka.NET's Akka.IO TCP layer between **1.5.58** and **1.6.0-beta4**, and measures two fixes for it:
+This repository measures three open fixes for regressions in Akka.NET 1.6 relative to 1.5:
 
-- [akkadotnet/akka.net#8874](https://github.com/akkadotnet/akka.net/pull/8874) removes the per-read allocation.
-- [petrikero/akka.net#40](https://github.com/petrikero/akka.net/pull/40) removes the extra thread-pool hops. It builds on #8874.
+- [petrikero/akka.net#40](https://github.com/petrikero/akka.net/pull/40) removes the extra thread-pool hop that 1.6 added to every Akka.IO TCP write and read. This hop doubles the latency of isolated writes.
+- [petrikero/akka.net#44](https://github.com/petrikero/akka.net/pull/44) reuses one `PipeReadCompleted` message per TCP connection instead of allocating one per read.
+- [petrikero/akka.net#42](https://github.com/petrikero/akka.net/pull/42) caches `ReceiveActor` handler matches per message type. In 1.6, the cost of a message grows with its handler's position in registration order.
 
-It also measures a third fix, for `ReceiveActor` handler matching: [petrikero/akka.net#42](https://github.com/petrikero/akka.net/pull/42).
-
-In 1.6, `TcpConnection` runs on `System.IO.Pipelines` with the default thread-pool schedulers. Every write and every read therefore crosses an extra thread-pool hop, and `RequestPipeRead` allocates a new async state machine for every read. Isolated writes take about twice as long to reach the socket, and each message costs one more thread-pool work item. CPU per message does not measurably change. Akka's `TcpOperationsBenchmarks` saturates the connection, where the separate write pump batches writes, so it does not show the regression. This benchmark runs at moderate, fixed rates, where most writes are isolated.
+An earlier fix measured here, the per-read allocation fix [akkadotnet/akka.net#8874](https://github.com/akkadotnet/akka.net/pull/8874), is merged into Akka.NET `dev`. Its measurements against 1.6.0-beta4 are in this repository's git history.
 
 ## What it measures
 
-The server is an Akka.IO TCP listener with one handler actor per connection. The client is a set of raw sockets in a separate process, so the client side is the same for every Akka build. Every frame carries a `Stopwatch` timestamp, so latency is one-way and measured at the receiver.
+**TCP workloads.** The server is an Akka.IO TCP listener with one handler actor per connection. The client is a set of raw sockets in a separate process, so the client side is the same for every Akka build. Every frame carries a `Stopwatch` timestamp, so latency is one-way and measured at the receiver.
 
 | Pattern | Traffic |
 |---|---|
@@ -21,116 +20,110 @@ The server is an Akka.IO TCP listener with one handler actor per connection. The
 
 The server reports CPU, allocated bytes and thread-pool work items (`ThreadPool.CompletedWorkItemCount`) per operation over the measurement window.
 
+**ReceiveActor matching.** The `match` mode runs an actor with 32 `Receive<T>` handlers and sends it messages that match handler `k`. It reports wall time and process CPU time per message.
+
 ## Running
 
 You need the .NET 10 SDK, Linux (`/proc`, `taskset`) and at least 16 cores for the default pinning.
 
 ```bash
-./run.sh                                   # 1.5.58 vs 1.6.0-beta4 from NuGet
-AKKA_SRC=~/src/akka.net ./run.sh           # also builds Akka.dll from a local akka.net checkout
+# TCP workloads: 1.5.58 from NuGet, plus Akka.dll built from each local akka.net checkout
+AKKA_BUILDS="dev=~/akka-dev pr40=~/akka-pr40 pr44=~/akka-pr44" ./run.sh
+
+# ReceiveActor matching, on builds that run.sh created under out/
+./match.sh v1.5.58 dev pr42
 ```
 
-The script builds each variant, runs every pattern for every build in alternating order, `REPS` times, and prints medians.
+`run.sh` runs every workload on every build in each repetition, with the build order rotated per repetition. It then prints, for each workload, the median of each build and each build's paired change versus `BASELINE`. The paired change is the mean over repetitions of `build / baseline − 1`, with a 95% t-interval. `summarize.py` prints the same summary from a saved results file.
 
 | Variable | Default | What it sets |
 |---|---|---|
-| `REPS` | 3 | repetitions of each pattern and build |
-| `WARMUP` | 10 | warm-up seconds |
-| `MEASURE` | 30 | measurement seconds |
-| `RATE` | 50 | operations per second per connection |
+| `AKKA_BUILDS` | required | `name=path` entries for local akka.net checkouts |
+| `BASELINE` | first `AKKA_BUILDS` entry | the build that the paired change compares against |
+| `REPS` | 8 | repetitions |
+| `WARMUP` | 8 | warm-up seconds per run |
+| `MEASURE` | 20 | measured seconds per run |
 | `CONNS` | 100 | number of connections |
-| `PATTERNS` | `push sink reply` | patterns to run |
+| `WORKLOADS` | `push:50 push:200 sink:50 reply:50` | `pattern:rate` pairs, where rate is operations per second per connection |
 | `SERVER_CPUS` | `0-7` | cores the server is pinned to |
 | `CLIENT_CPUS` | `8-15` | cores the client is pinned to |
+
+`match.sh` takes `REPS` (3), `KS` (`0 16 31`), `MILLIONS` (10) and `CPUS` (`0-3`).
+
+Akka's own `TcpOperationsBenchmarks`, from an akka.net checkout, with the iteration counts used below:
+
+```bash
+cd src/benchmark/Akka.Benchmarks
+dotnet run -c Release --framework net10.0 -- --filter '*TcpOperationsBenchmarks*' \
+  --launchCount 1 --warmupCount 3 --iterationCount 10
+```
 
 ## Results
 
 ### Setup
 
-- **Machine:** 24-core x86-64 Linux (WSL2), .NET 10, Server GC. The machine was shared, at load averages of 15–40.
-- **Pinning:** the server ran on 8 cores and the client on 8 others.
-- **Load:** 100 connections at 50 or 200 operations/s each.
-- **Windows:** 8 s warm-up, then 20 s measured.
-- **Runs:** each of 8 repetitions ran every workload on all three builds back to back, in rotating order.
-- **Builds:** `1.5.58` and `1.6.0-beta4` are the NuGet packages. The third build is `Akka.dll` from commit [`2b3cab2`](https://github.com/petrikero/akka.net/commit/2b3cab2ddd132e09f4bf6df9747d4cba0bfc75ed), which holds [#8874](https://github.com/akkadotnet/akka.net/pull/8874) and [#40](https://github.com/petrikero/akka.net/pull/40) together as they stood before review. The raw results call it `fix`. Review then changed three things. `CompoundWrite` parts and writes buffered before `Register` now flush once, the input pipe's writer moved back to the thread pool, and the read continuation gained `ConfigureAwait(false)`. The workloads below send only single writes and never fill the input pipe, so they do not reach the changed code.
-- **Cells:** the build columns show medians. The ratio columns show the paired mean change with a 95% confidence interval. The raw output of every run is in [`results/paired-matrix.txt`](results/paired-matrix.txt).
+- **Machine:** an x86-64 Linux host (WSL2) with 24 logical and 12 physical cores, running .NET 10 with Server GC. Nothing else ran on it, and the load average stayed below 0.5.
+- **Builds:** `dev` is Akka.NET `dev` at [`74ca5995f`](https://github.com/akkadotnet/akka.net/commit/74ca5995f). Each PR is a single commit on top of it: #40 at [`46a4851`](https://github.com/petrikero/akka.net/commit/46a485124), #44 at [`3416511`](https://github.com/petrikero/akka.net/commit/3416511ce) and #42 at [`1a252d2`](https://github.com/petrikero/akka.net/commit/1a252d267). `1.5.58` is the NuGet package, included as the reference for the regressions.
+- **TCP workloads:** 100 connections, 8 s warm-up and 20 s measured per run, with 8 repetitions in rotating build order. 50 operations/s per connection is 5,000/s in total, and 200 is 20,000/s.
+- **Cells:** the build columns show medians. The change columns show the paired mean change versus `dev`, with a 95% confidence interval.
 
-#### push at 5,000 writes/s (write path)
+### #40: thread-pool hops
 
-| | 1.5.58 | 1.6.0-beta4 | 1.6.0-beta4 + [#8874](https://github.com/akkadotnet/akka.net/pull/8874) + [#40](https://github.com/petrikero/akka.net/pull/40) | 1.6.0-beta4 vs 1.5.58 | fixes vs 1.6.0-beta4 |
-|---|---|---|---|---|---|
-| one-way latency p50 (ms) | 0.094 | 0.191 | 0.092 | +101% [+78, +128] | -54% [-63, -41] |
-| thread-pool work items per operation | 2.02 | 3.02 | 2.02 | +50% [+50, +50] | -33% [-33, -33] |
-| allocated per operation (B) | 577 | 334 | 332 | -42% [-43, -41] | -0% [-2, +1] |
-| CPU per operation (µs) | 137.8 | 136.1 | 135.7 | -4% [-9, +1] | +4% [-3, +11] |
+| | 1.5.58 | `dev` | #40 | #40 vs `dev` |
+|---|---|---|---|---|
+| push 5k/s: one-way latency p50 | 0.062 ms | 0.116 ms | 0.062 ms | −46.8% [−50.6, −43.0] |
+| push 20k/s: one-way latency p50 | 0.061 ms | 0.190 ms | 0.061 ms | −67.7% [−68.5, −66.8] |
+| reply (4 writes per request): latency p50 | 0.062 ms | 0.087 ms | 0.051 ms | −41.2% [−41.6, −40.9] |
+| sink: one-way latency p50 | 0.094 ms | 0.099 ms | 0.099 ms | −0.0% [−0.6, +0.6] |
+| thread-pool work items per write (push 5k/s) | 2.02 | 3.02 | 2.02 | −33.1% |
+| thread-pool work items per read (sink) | 2.38 | 3.39 | 2.40 | −29.4% |
+| thread-pool work items per request (reply) | 3.28 | 5.37 | 3.37 | −37.3% |
+| allocated per 64 B read (sink) | 188 B | 213 B | 181 B | −15.1% [−15.4, −14.9] |
+| CPU per operation (push 5k/s) | 94.2 µs | 94.5 µs | 95.8 µs | +3.1% [−0.1, +6.2] |
+| CPU per operation (push 20k/s) | 59.6 µs | 55.3 µs | 56.8 µs | +4.7% [+0.6, +8.8] |
+| CPU per operation (sink) | 46.1 µs | 48.2 µs | 48.5 µs | +0.5% [−1.2, +2.1] |
+| CPU per operation (reply) | 118.1 µs | 102.8 µs | 105.4 µs | +2.9% [+1.5, +4.3] |
 
-#### push at 20,000 writes/s
+#40 brings latency and thread-pool work back to the 1.5.58 level. CPU per operation rises by 3–5% against `dev` on the write-heavy workloads, and stays below 1.5.58 in push 20k/s and reply.
 
-| | 1.5.58 | 1.6.0-beta4 | 1.6.0-beta4 + [#8874](https://github.com/akkadotnet/akka.net/pull/8874) + [#40](https://github.com/petrikero/akka.net/pull/40) | 1.6.0-beta4 vs 1.5.58 | fixes vs 1.6.0-beta4 |
-|---|---|---|---|---|---|
-| one-way latency p50 (ms) | 0.076 | 0.258 | 0.069 | +252% [+201, +313] | -73% [-76, -69] |
-| thread-pool work items per operation | 2.00 | 3.00 | 2.00 | +50% [+50, +50] | -34% [-34, -33] |
-| allocated per operation (B) | 475 | 234 | 234 | -51% [-51, -50] | -0% [-1, +1] |
-| CPU per operation (µs) | 60.4 | 49.5 | 57.2 | -11% [-23, +4] | +10% [-6, +30] |
+**At saturation.** Akka's `TcpOperationsBenchmarks` sends bursts of unacked writes from 1–40 in-process clients as fast as possible. #40 sends from the actor's thread, so it gives up the separate write pump's batching across mailbox batches. The table shows time per message over 4 rounds in alternating build order, each with 1 launch, 3 warm-up and 10 measured iterations per case.
 
-#### sink at 5,000 reads/s (read path)
+| Clients | 10 B: `dev` | 10 B: #40 | 10 B: change | 100 B: `dev` | 100 B: #40 | 100 B: change |
+|---|---|---|---|---|---|---|
+| 1 | 8,328 ns | 8,109 ns | −2.2% [−3.3, −1.1] | 8,740 ns | 8,296 ns | −5.1% [−5.9, −4.3] |
+| 3 | 2,234 ns | 1,936 ns | −13.0% [−15.1, −10.9] | 2,429 ns | 2,062 ns | −15.1% [−16.2, −14.1] |
+| 5 | 1,435 ns | 1,226 ns | −14.1% [−17.6, −10.7] | 1,583 ns | 1,306 ns | −15.8% [−22.0, −9.7] |
+| 7 | 1,075 ns | 922 ns | −13.9% [−15.2, −12.5] | 1,165 ns | 1,001 ns | −13.0% [−18.9, −7.1] |
+| 10 | 756 ns | 708 ns | −5.3% [−12.5, +2.0] | 814 ns | 751 ns | −8.1% [−9.6, −6.5] |
+| 20 | 512 ns | 489 ns | −4.3% [−5.1, −3.4] | 570 ns | 538 ns | −6.1% [−7.3, −4.9] |
+| 30 | 449 ns | 414 ns | −6.7% [−10.2, −3.2] | 497 ns | 460 ns | −5.2% [−14.3, +3.8] |
+| 40 | 412 ns | 375 ns | −9.3% [−12.5, −6.0] | 442 ns | 420 ns | −5.9% [−10.0, −1.9] |
 
-| | 1.5.58 | 1.6.0-beta4 | 1.6.0-beta4 + [#8874](https://github.com/akkadotnet/akka.net/pull/8874) + [#40](https://github.com/petrikero/akka.net/pull/40) | 1.6.0-beta4 vs 1.5.58 | fixes vs 1.6.0-beta4 |
-|---|---|---|---|---|---|
-| one-way latency p50 (ms) | 0.254 | 0.256 | 0.277 | +1% [-19, +26] | +6% [-15, +31] |
-| thread-pool work items per operation | 2.36 | 3.37 | 2.38 | +43% [+42, +44] | -30% [-33, -28] |
-| allocated per operation (B) | 188 | 341 | 181 | +81% [+80, +82] | -47% [-48, -46] |
-| CPU per operation (µs) | 102.4 | 106.3 | 109.6 | +6% [-14, +30] | -9% [-28, +17] |
+#40 is faster than `dev` in every case. An earlier measurement against 1.6.0-beta4, on a host at load averages of 15–40, showed 15% more time per message at 40 clients with 100 B messages. That does not reproduce against `dev` on an idle host.
 
-#### reply at 5,000 requests/s (4 writes per request)
+### #44: read message reuse
 
-| | 1.5.58 | 1.6.0-beta4 | 1.6.0-beta4 + [#8874](https://github.com/akkadotnet/akka.net/pull/8874) + [#40](https://github.com/petrikero/akka.net/pull/40) | 1.6.0-beta4 vs 1.5.58 | fixes vs 1.6.0-beta4 |
-|---|---|---|---|---|---|
-| one-way latency p50 (ms) | 0.085 | 0.144 | 0.072 | +63% [+41, +89] | -48% [-53, -44] |
-| thread-pool work items per operation | 3.34 | 5.37 | 3.36 | +61% [+60, +61] | -37% [-38, -37] |
-| allocated per operation (B) | 1581 | 1141 | 981 | -28% [-28, -28] | -14% [-14, -14] |
-| CPU per operation (µs) | 153.4 | 138.4 | 151.7 | -9% [-15, -2] | +6% [-4, +16] |CPU per operation is not significantly different between the three builds in any workload. Latency, thread-pool work items and allocations are.
-
-### Where the read allocation comes from
-
-An EventPipe allocation profile of `sink` on 1.6.0-beta4 (`dotnet-trace --profile gc-verbose`):
-
-| Share of sampled bytes | Type |
-|---|---|
-| 68% | `AsyncStateMachineBox<…, TcpConnection+<ReadPipeAndSendAsync>d__71>`, from `RequestPipeRead` |
-| 14% | `TcpConnection+PipeReadCompleted` |
-| 10% | `byte[]` (the copy of the received bytes) |
-| 6% | `Tcp.Received` |
-
-The allocation fix is [akkadotnet/akka.net#8874](https://github.com/akkadotnet/akka.net/pull/8874): one reused read continuation per connection instead of an async method per read. On its own it takes a 64 B read from 342 B to 214 B. This was measured at commit [`e3a3e7d`](https://github.com/petrikero/akka.net/commit/e3a3e7d75d538d756b861426c1abff2db3a548a1), which differs from the final PR only by `ConfigureAwait(false)` on the continuation. The latency fix, [#40](https://github.com/petrikero/akka.net/pull/40), builds on it. The third build in the tables above holds both.
-
-### The trade-off at saturation
-
-Akka's `TcpOperationsBenchmarks` sends bursts of unacked writes from 1–40 in-process clients as fast as possible. Time per message, 1.6.0-beta4 + [#8874](https://github.com/akkadotnet/akka.net/pull/8874) + [#40](https://github.com/petrikero/akka.net/pull/40) (commit `2b3cab2`, not re-run since review) vs 1.6.0-beta4:
-
-| Clients | 1 | 3 | 5 | 7 | 10 | 20 | 30 | 40 |
-|---|---|---|---|---|---|---|---|---|
-| 10 B messages | −5% | −16% | −14% | −5% | −2% | +3% [−2, +8] | +2% [−3, +7] | +3% [−4, +12] |
-| 100 B messages | −5% | −20% | −16% | −8% | −8% | +1% [−5, +8] | +4% [−3, +12] | **+15% [+12, +19]** |
-
-The cells for 1–10 clients come from one round. The cells for 20–40 clients are paired means over 4 alternating rounds.
-
-#40 sends from the actor's thread, which gives up some of the separate write pump's batching when many connections saturate the dispatcher. Writes still coalesce within one mailbox batch, because the flush is deferred to a self-message when more messages are queued.
-
-## ReceiveActor handler matching
-
-1.6.0-beta4 also replaced `ReceiveActor`'s compiled message matcher with a loop that calls `Type.IsAssignableFrom` on each registered handler in turn, so a message's cost grows with its handler's position. The `match` mode measures this: an actor with 32 `Receive<T>` handlers, sent messages that match handler `k`.
-
-```bash
-out/v1.6.0-beta4/TcpBench match k=31 millions=10
-```
-
-The table shows wall time per message, as the median of 3 runs, with the sender and the actor pinned to 4 cores. The raw output is in [`results/receive-actor-matching.txt`](results/receive-actor-matching.txt).
-
-| Handler matched | 1.5.58 | 1.6.0-beta4 | 1.6.0-beta4 + [#42](https://github.com/petrikero/akka.net/pull/42) |
+| Allocated per operation | `dev` | #44 | #44 vs `dev` |
 |---|---|---|---|
-| 1st | 53 ns | 58 ns | 52 ns |
-| 17th | 53 ns | 98 ns | 58 ns |
-| 32nd | 57 ns | 187 ns | 57 ns |
+| sink: one 64 B read | 213 B | 165 B | −22.7% [−22.8, −22.5] |
+| reply: one 64 B read and four 128 B writes | 1013 B | 965 B | −4.8% [−4.8, −4.7] |
 
-The dispatch cache, in [petrikero/akka.net#42](https://github.com/petrikero/akka.net/pull/42), remembers per message type which handlers can take it. This was measured at commit [`fdbeca0`](https://github.com/petrikero/akka.net/commit/fdbeca052f84ce5990d157a41f481f3f90273c50), where the raw results call it `1.6.0-beta4+dispatch-cache`. Review then made actors with 4 or fewer handlers keep the linear scan, which does not change this 32-handler test.
+Latency, thread-pool work items and CPU per operation do not change significantly in any workload.
+
+### #42: ReceiveActor handler matching
+
+Wall time per message, as the median of 3 runs of 10 million messages, with the sender and the actor pinned to 4 cores:
+
+| Handler matched | 1.5.58 | `dev` | #42 |
+|---|---|---|---|
+| 1st | 58 ns | 55 ns | 63 ns |
+| 17th | 61 ns | 109 ns | 64 ns |
+| 32nd | 65 ns | 165 ns | 63 ns |
+
+With #42, the cost no longer depends on where the handler sits in the list. In return, a message whose handler is first pays for a dictionary lookup on the message type. In 8 further paired runs at the 1st handler, wall time per message rose from 59.4 ns to 64.9 ns (+11.9% [+5.9, +17.8]), and process CPU per message by 5.0% [+2.0, +8.0].
+
+### Raw data
+
+- [`results/tcp-paired.txt`](results/tcp-paired.txt): every TCP workload run. The builds are named after their branches: `akka-io-tcp-inline-pipes` is #40 and `akka-io-tcp-read-message-reuse` is #44.
+- [`results/tcp-operations-benchmarks/`](results/tcp-operations-benchmarks/): the BenchmarkDotNet report of each round.
+- [`results/receive-actor-matching.txt`](results/receive-actor-matching.txt) and [`results/receive-actor-matching-k0-paired.txt`](results/receive-actor-matching-k0-paired.txt): the `match` runs, where `receive-dispatch-cache` is #42. The first file's runs used a fixed build order, before `match.sh` rotated it. The second alternated the order.
